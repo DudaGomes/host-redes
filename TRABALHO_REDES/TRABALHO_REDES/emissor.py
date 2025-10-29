@@ -5,10 +5,10 @@ import time
 import json
 
 # --- CONFIGURAÇÕES ---
-ROUTER_ADDR = ('127.0.0.1', 9002)   # IP do roteador
+ROUTER_ADDR = ('127.0.0.1', 9000)   # IP do roteador (porta corrigida)
 SENDER_ADDR = ('127.0.0.1', 9001)   # IP local
 WINDOW_SIZE = 5 #tamanho da janela
-TIMEOUT = 0.5 #tempo de timeout em segundos
+TIMEOUT = 20 #tempo de timeout em segundos
 MAX_DATA_SIZE = 50 #tamanho máximo dos dados em bytes
 
 # --- VARIÁVEIS ---
@@ -69,16 +69,18 @@ def escutar_acks(sock):
 
             with lock:
                 if ack + 1 > base:
+                    old_base = base
                     base = ack + 1
+                    print(f"[Emissor] Base moveu de {old_base} para {base} (next_seq_num={next_seq_num})")
                     if base == next_seq_num:
                         if timer: timer.cancel()
                         timer = None
-                        print("[Emissor] Timer parado.")
+                        print("[Emissor] Timer parado - TODOS OS PACOTES CONFIRMADOS!")
                     else:
                         if timer: timer.cancel()
                         timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
                         timer.start()
-                        print("[Emissor] Timer reiniciado.")
+                        print(f"[Emissor] Timer reiniciado. Aguardando ACKs de {base} até {next_seq_num-1}")
         except Exception:
             break
 
@@ -104,7 +106,7 @@ if __name__ == "__main__":
                     pacote = criar_pacote(next_seq_num, bloco)
                     buffer_pacotes[next_seq_num] = pacote
                     sock.sendto(pacote, ROUTER_ADDR)
-                    print(f"[Emissor] Pacote {next_seq_num} enviado.")
+                    print(f"[Emissor] Pacote {next_seq_num} enviado. (janela: {base} a {base+WINDOW_SIZE-1})")
                     if base == next_seq_num:
                         if timer: timer.cancel()
                         timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
@@ -112,15 +114,26 @@ if __name__ == "__main__":
                     next_seq_num += 1
             else:
                 time.sleep(0.01)
+        
+        print(f"\n[Emissor] Todos os dados enviados. data_ptr={data_ptr}, len(dados)={len(dados)}")
 
         # Pacote final (FIN)
-        pacote_fin = criar_pacote(next_seq_num, b'')
-        buffer_pacotes[next_seq_num] = pacote_fin
-        sock.sendto(pacote_fin, ROUTER_ADDR)
-        print(f"[Emissor] FIN (seq {next_seq_num}) enviado.")
+        with lock:
+            pacote_fin = criar_pacote(next_seq_num, b'')
+            buffer_pacotes[next_seq_num] = pacote_fin
+            sock.sendto(pacote_fin, ROUTER_ADDR)
+            print(f"[Emissor] FIN (seq {next_seq_num}) enviado.")
+            if timer is None or base == next_seq_num:
+                if timer: timer.cancel()
+                timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
+                timer.start()
+                print("[Emissor] Timer iniciado para FIN")
+            next_seq_num += 1
 
-        while base <= next_seq_num:
+        print(f"[Emissor] Aguardando confirmação final. base={base}, next_seq_num={next_seq_num}")
+        while base < next_seq_num:
             time.sleep(0.05)
+        print(f"[Emissor] Confirmação final recebida! base={base}, next_seq_num={next_seq_num}")
 
     finally:
         if timer: timer.cancel()

@@ -45,14 +45,14 @@ public class Receptor {
                 int checksumCalculado = calcularChecksum(checksumData);
 
                 if (checksumRecebido != checksumCalculado) {
-                    System.out.println("[Receptor] Pacote corrompido! Ignorando...");
+                    System.out.println("[Receptor] Pacote corrompido! Ignorando... (esperava seq=" + expectedSeq + ")");
                     enviarAck(socket, expectedSeq - 1);
                     continue;
                 }
 
                 if (seqNum == expectedSeq) {
                     mensagem.write(conteudo);
-                    System.out.println("[Receptor] Pacote " + seqNum + " aceito.");
+                    System.out.println("[Receptor] Pacote " + seqNum + " ACEITO! (novo expectedSeq=" + (expectedSeq+1) + ")");
                     expectedSeq++;
                 } else {
                     System.out.println("[Receptor] Fora de ordem (esperado=" + expectedSeq + ", recebido=" + seqNum + ")");

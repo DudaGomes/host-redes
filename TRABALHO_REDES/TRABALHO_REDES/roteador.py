@@ -78,6 +78,7 @@ class UDPRouter:
         self.force_corrupt_seqs = set(force_corrupt_seqs or [])
         self.force_dup_seqs = set(force_dup_seqs or [])
         self.force_reorder_seqs = set(force_reorder_seqs or [])
+        self.interactive_mode = False  # Modo interativo desligado por padrão
 
     # --- runtime control of forced rules ---
     def add_forced(self, typ: str, seqs):
@@ -143,49 +144,97 @@ class UDPRouter:
                 except Exception:
                     seq = None
 
-            # Forçar DROP por seq ou aleatório
-            if seq is not None and seq in self.force_drop_seqs:
-                print(f"[Router→] FORCED DROP pacote seq={seq}")
-                continue
-            if random.random() < self.p_drop_fwd:
-                print("[Router→] DROP pacote")
-                continue
-
-            # Forçar CORRUPT por seq ou aleatório
-            if seq is not None and seq in self.force_corrupt_seqs:
-                data = data[:4] + scramble_payload(data[4:], self.scramble_mode_fwd)
-                print(f"[Router→] FORCED CORRUPT seq={seq}")
-            elif random.random() < self.p_corrupt_fwd:
-                data = data[:4] + scramble_payload(data[4:], self.scramble_mode_fwd)
-                print("[Router→] CORRUPT payload")
-
-            maybe(self.delay_mean_fwd)
-
-            with self.lock:
-                # Forçar HOLD (reorder) por seq
-                if seq is not None and seq in self.force_reorder_seqs:
-                    self.buffer_reorder.append(data)
-                    print(f"[Router→] FORCED HOLD seq={seq} para reordenar (buffer={len(self.buffer_reorder)})")
+            # Menu interativo para cada pacote
+            if hasattr(self, 'interactive_mode') and self.interactive_mode:
+                print(f"\n{'='*60}")
+                print(f"PACOTE RECEBIDO: seq={seq if seq is not None else '?'}")
+                print(f"{'='*60}")
+                print("O que fazer com este pacote?")
+                print("  1 - Enviar normalmente")
+                print("  2 - PERDER (drop)")
+                print("  3 - CORROMPER")
+                print("  4 - DUPLICAR")
+                print("  5 - Modo automático (desliga interativo)")
+                
+                escolha = input("Escolha (1-5): ").strip()
+                
+                if escolha == '1':
+                    print(f"[Router→] ENVIANDO normalmente seq={seq}")
+                    self.sock_fwd.sendto(data, self.receiver_addr)
+                    
+                elif escolha == '2':
+                    print(f"[Router→] PERDENDO pacote seq={seq}")
                     continue
-                if self.reorder_window > 0 and random.random() < self.p_reorder_fwd:
-                    self.buffer_reorder.append(data)
-                    print("[Router→] HOLD pacote p/ reordenação")
-                    continue
-                if self.buffer_reorder and (len(self.buffer_reorder) >= self.reorder_window or random.random() < 0.5):
-                    pkt = self.buffer_reorder.popleft()
-                    self.sock_fwd.sendto(pkt, self.receiver_addr)
-                    print("[Router→] REORDER envio de pacote antigo")
+                    
+                elif escolha == '3':
+                    data_corrupted = data[:4] + scramble_payload(data[4:], self.scramble_mode_fwd)
+                    print(f"[Router→] CORROMPENDO pacote seq={seq}")
+                    self.sock_fwd.sendto(data_corrupted, self.receiver_addr)
+                    
+                elif escolha == '4':
+                    print(f"[Router→] DUPLICANDO pacote seq={seq}")
+                    self.sock_fwd.sendto(data, self.receiver_addr)
+                    time.sleep(0.02)
+                    self.sock_fwd.sendto(data, self.receiver_addr)
+                        
+                elif escolha == '5':
+                    self.interactive_mode = False
+                    print("[Router] Modo interativo DESLIGADO - usando probabilidades")
+                    # Processa este pacote automaticamente
+                    self._process_packet_auto(data, seq)
+                    
+                else:
+                    print("Opção inválida! Enviando normalmente...")
+                    self.sock_fwd.sendto(data, self.receiver_addr)
+            else:
+                # Modo automático (original)
+                self._process_packet_auto(data, seq)
 
+    def _process_packet_auto(self, data, seq):
+        """Processa pacote automaticamente usando probabilidades"""
+        # Forçar DROP por seq ou aleatório
+        if seq is not None and seq in self.force_drop_seqs:
+            print(f"[Router→] FORCED DROP pacote seq={seq}")
+            return
+        if random.random() < self.p_drop_fwd:
+            print("[Router→] DROP pacote")
+            return
+
+        # Forçar CORRUPT por seq ou aleatório
+        if seq is not None and seq in self.force_corrupt_seqs:
+            data = data[:4] + scramble_payload(data[4:], self.scramble_mode_fwd)
+            print(f"[Router→] FORCED CORRUPT seq={seq}")
+        elif random.random() < self.p_corrupt_fwd:
+            data = data[:4] + scramble_payload(data[4:], self.scramble_mode_fwd)
+            print("[Router→] CORRUPT payload")
+
+        maybe(self.delay_mean_fwd)
+
+        with self.lock:
+            # Forçar HOLD (reorder) por seq
+            if seq is not None and seq in self.force_reorder_seqs:
+                self.buffer_reorder.append(data)
+                print(f"[Router→] FORCED HOLD seq={seq} para reordenar (buffer={len(self.buffer_reorder)})")
+                return
+            if self.reorder_window > 0 and random.random() < self.p_reorder_fwd:
+                self.buffer_reorder.append(data)
+                print("[Router→] HOLD pacote p/ reordenação")
+                return
+            if self.buffer_reorder and (len(self.buffer_reorder) >= self.reorder_window or random.random() < 0.5):
+                pkt = self.buffer_reorder.popleft()
+                self.sock_fwd.sendto(pkt, self.receiver_addr)
+                print("[Router→] REORDER envio de pacote antigo")
+
+        self.sock_fwd.sendto(data, self.receiver_addr)
+        # Duplicação forçada por seq
+        if seq is not None and seq in self.force_dup_seqs:
+            time.sleep(0.02)
             self.sock_fwd.sendto(data, self.receiver_addr)
-            # Duplicação forçada por seq
-            if seq is not None and seq in self.force_dup_seqs:
-                time.sleep(0.02)
-                self.sock_fwd.sendto(data, self.receiver_addr)
-                print(f"[Router→] FORCED DUP seq={seq}")
-            elif random.random() < self.p_dup_fwd:
-                time.sleep(0.02)
-                self.sock_fwd.sendto(data, self.receiver_addr)
-                print("[Router→] DUP pacote")
+            print(f"[Router→] FORCED DUP seq={seq}")
+        elif random.random() < self.p_dup_fwd:
+            time.sleep(0.02)
+            self.sock_fwd.sendto(data, self.receiver_addr)
+            print("[Router→] DUP pacote")
 
     def thread_backward(self):
         print(f"[Router] Escutando ACKs do receptor em {self.receiver_addr[1]}")
@@ -237,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--force-dup", type=str, default="", help="Seq numbers/ranges to FORCE duplicate")
     parser.add_argument("--force-reorder", type=str, default="", help="Seq numbers/ranges to FORCE reorder (hold)")
     parser.add_argument("--interactive-control", action="store_true", help="Start interactive control prompt to add/remove forced errors at runtime")
+    parser.add_argument("--interactive", action="store_true", help="Modo interativo: escolha acao para cada pacote")
 
     args = parser.parse_args()
 
@@ -255,6 +305,16 @@ if __name__ == "__main__":
         reorder_window=args.reorder_window,
         force_drop_seqs=forced_drop, force_corrupt_seqs=forced_corrupt, force_dup_seqs=forced_dup, force_reorder_seqs=forced_reorder
     )
+    
+    # Ativa modo interativo se solicitado
+    if args.interactive:
+        router.interactive_mode = True
+        print("\n" + "="*60)
+        print("MODO INTERATIVO ATIVADO!")
+        print("="*60)
+        print("Voce podera escolher o que fazer com cada pacote recebido.")
+        print("Opcoes: enviar, perder, corromper, duplicar ou segurar")
+        print("="*60 + "\n")
 
     # controle interativo em tempo de execução (opcional)
     if getattr(args, 'interactive_control', False):
