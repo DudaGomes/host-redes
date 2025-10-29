@@ -1,13 +1,13 @@
 import java.io.*;
 import java.net.*;
-import java.nio.ByteBuffer;
+import java.nio.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
-public class receptor {
+public class Receptor {
 
     private static final int PORTA_RECEPTOR = 9002;
-    private static final int PORTA_EMISSOR = 9001;
+    private static final int PORTA_EMISSOR = 9003;
     private static final String IP = "127.0.0.1";
     private static final int MAX_DATA_SIZE = 50;
 
@@ -26,25 +26,22 @@ public class receptor {
                 socket.receive(pacote);
                 byte[] dados = Arrays.copyOf(pacote.getData(), pacote.getLength());
 
-                // Decodificar binário: [seq_num (2 bytes)] [checksum (2 bytes)] [dados...]
                 if (dados.length < 4) {
                     System.out.println("[Receptor] Pacote muito pequeno! Ignorando...");
                     continue;
                 }
 
                 ByteBuffer bb = ByteBuffer.wrap(dados);
-                bb.order(java.nio.ByteOrder.BIG_ENDIAN); // mesmo que '!' no Python struct
+                bb.order(ByteOrder.BIG_ENDIAN);
 
                 int seqNum = bb.getShort() & 0xFFFF;
                 int checksumRecebido = bb.getShort() & 0xFFFF;
                 byte[] conteudo = Arrays.copyOfRange(dados, 4, dados.length);
 
-                // Calcular checksum local
                 byte[] checksumData = new byte[2 + conteudo.length];
                 checksumData[0] = (byte) ((seqNum >> 8) & 0xFF);
                 checksumData[1] = (byte) (seqNum & 0xFF);
                 System.arraycopy(conteudo, 0, checksumData, 2, conteudo.length);
-
                 int checksumCalculado = calcularChecksum(checksumData);
 
                 if (checksumRecebido != checksumCalculado) {
@@ -52,8 +49,6 @@ public class receptor {
                     enviarAck(socket, expectedSeq - 1);
                     continue;
                 }
-
-                System.out.println("[Receptor] Pacote recebido seq=" + seqNum);
 
                 if (seqNum == expectedSeq) {
                     mensagem.write(conteudo);
@@ -66,15 +61,14 @@ public class receptor {
                 enviarAck(socket, expectedSeq - 1);
 
                 if (conteudo.length < MAX_DATA_SIZE) {
-                    System.out.println("\n[Receptor] Provável fim da transmissão.");
-                    Thread.sleep(1000);
+                    System.out.println("\n[Receptor] Fim da transmissão detectado.");
                     break;
                 }
             }
 
-            System.out.println("\n===== MENSAGEM COMPLETA RECEBIDA =====");
+            System.out.println("\n===== MENSAGEM COMPLETA =====");
             System.out.println(new String(mensagem.toByteArray(), StandardCharsets.UTF_8));
-            System.out.println("======================================");
+            System.out.println("=============================");
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -84,11 +78,9 @@ public class receptor {
         }
     }
 
-    // === Cálculo de checksum igual ao Python ===
     private static int calcularChecksum(byte[] dados) {
-        if (dados.length % 2 != 0) {
+        if (dados.length % 2 != 0)
             dados = Arrays.copyOf(dados, dados.length + 1);
-        }
 
         int soma = 0;
         for (int i = 0; i < dados.length; i += 2) {
@@ -96,7 +88,6 @@ public class receptor {
             soma += palavra;
             soma = (soma & 0xFFFF) + (soma >> 16);
         }
-
         return (~soma) & 0xFFFF;
     }
 

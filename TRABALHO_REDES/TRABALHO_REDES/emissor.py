@@ -2,26 +2,27 @@ import socket
 import threading
 import struct
 import time
+import json
 
-# --- Configurações ---
-ROUTER_ADDR = ('127.0.0.1', 9002)
-SENDER_ADDR = ('127.0.0.1', 9001)
-WINDOW_SIZE = 5
-TIMEOUT = 0.5
+# --- CONFIGURAÇÕES ---
+ROUTER_ADDR = ('127.0.0.1', 9002)   # IP do roteador
+SENDER_ADDR = ('127.0.0.1', 9001)   # IP local
+WINDOW_SIZE = 5 #tamanho da janela
+TIMEOUT = 0.5 #tempo de timeout em segundos
+MAX_DATA_SIZE = 50 #tamanho máximo dos dados em bytes
 
-# --- Variáveis globais ---
-base = 0
-next_seq_num = 0
-buffer_pacotes = {}
-lock = threading.Lock()
-timer = None
-emissor_ativo = True
+# --- VARIÁVEIS ---
+base = 0 #menor número de sequência não reconhecido
+next_seq_num = 0 #próximo número de sequência a ser usado
+buffer_pacotes = {} #armazenar pacotes enviados mas não reconhecidos
+lock = threading.Lock() #trava para sincronização de threads
+timer = None # referencia ao timer para timeout
+emissor_ativo = True #indica se o emissor está ativo
 
-# --- Função 1: Checksum manual ---
+# --- CHECKSUM ---
 def calcular_checksum(dados: bytes) -> int:
     if len(dados) % 2 != 0:
         dados += b'\0'
-
     soma = 0
     for i in range(0, len(dados), 2):
         palavra = (dados[i] << 8) + dados[i + 1]
@@ -29,109 +30,100 @@ def calcular_checksum(dados: bytes) -> int:
         soma = (soma & 0xFFFF) + (soma >> 16)
     return ~soma & 0xFFFF
 
-# --- Função 2: Criar pacote binário ---
+# --- CRIAR PACOTE ---
 def criar_pacote(seq_num, dados: bytes):
     header_sem_checksum = struct.pack("!H", seq_num) + dados
     checksum = calcular_checksum(header_sem_checksum)
-    pacote = struct.pack("!HH", seq_num, checksum) + dados
-    return pacote
+    return struct.pack("!HH", seq_num, checksum) + dados
 
-# --- Timeout ---
+# --- TIMEOUT ---
 def evento_timeout(sock):
     global timer
     if not emissor_ativo:
         return
     with lock:
-        print(f"--- [Emissor] TIMEOUT! ---")
-        print(f"[Emissor] Reenviando pacotes de {base} até {next_seq_num - 1}")
+        print(f"\n[Emissor] TIMEOUT! Reenviando de {base} até {next_seq_num - 1}")
         for i in range(base, next_seq_num):
             if i in buffer_pacotes:
                 sock.sendto(buffer_pacotes[i], ROUTER_ADDR)
-                print(f"[Emissor] Pacote {i} reenviado.")
+                print(f"[Emissor] Reenviado pacote {i}.")
         if timer:
             timer.cancel()
         timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
         timer.start()
 
-# --- Escutar ACKs ---
+# --- RECEBER ACKs ---
 def escutar_acks(sock):
     global base, timer, emissor_ativo
     while emissor_ativo:
         try:
             dados_ack, _ = sock.recvfrom(1024)
-            ack_str = dados_ack.decode(errors='ignore')
-            if "ack_num" in ack_str:
-                ack_num = int(''.join(c for c in ack_str if c.isdigit()))
-                print(f"[Emissor] Recebeu ACK para: {ack_num}")
-                with lock:
-                    if ack_num + 1 > base:
-                        base = ack_num + 1
-                        if base == next_seq_num:
-                            if timer:
-                                timer.cancel()
-                            timer = None
-                            print("[Emissor] Timer parado.")
-                        else:
-                            if timer:
-                                timer.cancel()
-                            timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
-                            timer.start()
-                            print("[Emissor] Timer reiniciado.")
+            s = dados_ack.decode('utf-8', errors='ignore').replace("'", '"').strip()
+            try:
+                ack = json.loads(s).get("ack_num")
+            except:
+                continue
+            if ack is None:
+                continue
+            print(f"[Emissor] Recebeu ACK({ack})")
+
+            with lock:
+                if ack + 1 > base:
+                    base = ack + 1
+                    if base == next_seq_num:
+                        if timer: timer.cancel()
+                        timer = None
+                        print("[Emissor] Timer parado.")
+                    else:
+                        if timer: timer.cancel()
+                        timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
+                        timer.start()
+                        print("[Emissor] Timer reiniciado.")
         except Exception:
             break
 
-# --- Programa principal ---
+# --- PRINCIPAL ---
 if __name__ == "__main__":
-    MAX_DATA_SIZE = 50
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind(SENDER_ADDR)
-        print(f"[Emissor] Socket criado e escutando ACKs em {SENDER_ADDR}")
-    except OSError as e:
-        print(f"[Emissor] Erro: porta {SENDER_ADDR[1]} já em uso. {e}")
-        exit()
+    sock.bind(SENDER_ADDR)
+    print(f"[Emissor] Escutando ACKs em {SENDER_ADDR}")
 
-    texto_usuario = input("Digite a mensagem para enviar e pressione Enter: ")
-    MEU_TEXTO = texto_usuario.encode('utf-8')
-
-    print(f"[Emissor] Mensagem a ser enviada: {MEU_TEXTO}")
-    print(f"[Emissor] Tamanho: {len(MEU_TEXTO)} bytes")
+    texto = input("Digite a mensagem para enviar: ")
+    dados = texto.encode('utf-8')
 
     emissor_ativo = True
-    thread_acks = threading.Thread(target=escutar_acks, args=(sock,), daemon=True)
-    thread_acks.start()
+    threading.Thread(target=escutar_acks, args=(sock,), daemon=True).start()
 
-    data_pointer = 0
-
+    data_ptr = 0
     try:
-        while data_pointer < len(MEU_TEXTO) or base < next_seq_num:
-            if next_seq_num < base + WINDOW_SIZE and data_pointer < len(MEU_TEXTO):
+        while data_ptr < len(dados) or base < next_seq_num:
+            if next_seq_num < base + WINDOW_SIZE and data_ptr < len(dados):
                 with lock:
-                    chunk = MEU_TEXTO[data_pointer:data_pointer + MAX_DATA_SIZE]
-                    data_pointer += len(chunk)
-                    pacote = criar_pacote(next_seq_num, chunk)
+                    bloco = dados[data_ptr:data_ptr + MAX_DATA_SIZE]
+                    data_ptr += len(bloco)
+                    pacote = criar_pacote(next_seq_num, bloco)
                     buffer_pacotes[next_seq_num] = pacote
                     sock.sendto(pacote, ROUTER_ADDR)
                     print(f"[Emissor] Pacote {next_seq_num} enviado.")
                     if base == next_seq_num:
-                        if timer:
-                            timer.cancel()
+                        if timer: timer.cancel()
                         timer = threading.Timer(TIMEOUT, evento_timeout, args=(sock,))
                         timer.start()
                     next_seq_num += 1
             else:
                 time.sleep(0.01)
 
-            if data_pointer >= len(MEU_TEXTO) and base == next_seq_num:
-                break
+        # Pacote final (FIN)
+        pacote_fin = criar_pacote(next_seq_num, b'')
+        buffer_pacotes[next_seq_num] = pacote_fin
+        sock.sendto(pacote_fin, ROUTER_ADDR)
+        print(f"[Emissor] FIN (seq {next_seq_num}) enviado.")
 
-    except KeyboardInterrupt:
-        print("\n[Emissor] Encerrando por usuário.")
+        while base <= next_seq_num:
+            time.sleep(0.05)
+
     finally:
-        print("[Emissor] Envio concluído. Encerrando.")
-        if timer:
-            timer.cancel()
+        if timer: timer.cancel()
         emissor_ativo = False
         sock.close()
-        thread_acks.join(timeout=1.0)
-        print("[Emissor] Socket e threads fechados.")
+        print("\n[Emissor] Envio concluído e socket fechado.")
